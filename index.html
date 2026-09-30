@@ -553,6 +553,41 @@
             return pos;
         };
 
+        // ===== 線路の重なりの整理：すでにある線路と同じ場所（同じ点どうしの線分）に重ねて描いた部分は、線路として残さない =====
+        // 重なった線路があると、その点で「いま来た道を戻る」選択肢ができてしまい、線路の途中で何回も折り返していた
+        const SAME_R = 5, ON_R = 3; // 同じ点とみなす距離（連結の判定と同じ）／同じ直線上とみなす距離
+        const samePt = (a, b) => Math.abs(a.x - b.x) < SAME_R && Math.abs(a.y - b.y) < SAME_R && getDistance(a, b) < SAME_R;
+        const sameSeg = (a, b, c, d) => (samePt(a, c) && samePt(b, d)) || (samePt(a, d) && samePt(b, c));
+        const hasSeg = (p, q, list) => list.some(t => { for (let i = 0; i < t.length - 1; i++) if (sameSeg(t[i], t[i + 1], p, q)) return true; return false; });
+        const splitAtOverlapNodes = (p, q, others) => { // p→q が既存の線路と重なって走っているとき、既存の点で区切る（点を1つ飛ばして描いた重ねも、同じ線分として見つけるため）
+            let dx = q.x - p.x, dy = q.y - p.y, L2 = dx * dx + dy * dy;
+            if (!L2) return [p, q];
+            const onLine = (n) => { let t = ((n.x - p.x) * dx + (n.y - p.y) * dy) / L2; return { t: t, d: Math.hypot(n.x - (p.x + t * dx), n.y - (p.y + t * dy)) }; };
+            let hits = [];
+            for (const tr of others) for (let i = 0; i < tr.length; i++) {
+                let n = tr[i], o = onLine(n);
+                if (o.d >= ON_R || o.t <= 0 || o.t >= 1 || samePt(n, p) || samePt(n, q)) continue;
+                if ([tr[i - 1], tr[i + 1]].some(m => m && onLine(m).d < ON_R)) hits.push({ t: o.t, n: n }); // 隣の点も同じ直線上にあるなら、重なっている
+            }
+            hits.sort((a, b) => a.t - b.t);
+            let pts = [p];
+            hits.forEach(h => { if (!samePt(pts[pts.length - 1], h.n)) pts.push({ x: h.n.x, y: h.n.y }); });
+            pts.push(q);
+            return pts;
+        };
+        const cleanOverlap = (stroke, others) => { // 新しく描いた線路から、重なった線分を取り除く。残った連続部分ごとに線路として返す
+            let pts = [stroke[0]];
+            for (let i = 0; i + 1 < stroke.length; i++) pts.push(...splitAtOverlapNodes(stroke[i], stroke[i + 1], others).slice(1));
+            let pieces = [], cur = null, mine = [];
+            for (let i = 0; i + 1 < pts.length; i++) {
+                let a = pts[i], b = pts[i + 1];
+                if (samePt(a, b) || hasSeg(a, b, others) || mine.some(m => sameSeg(m[0], m[1], a, b))) { cur = null; continue; } // 重なり・同じ点の線分は捨てる
+                if (!cur) { cur = [a]; pieces.push(cur); }
+                cur.push(b); mine.push([a, b]);
+            }
+            return pieces;
+        };
+
         canvas.addEventListener('mousedown', (e) => { beginOp(); if (eraserOn) { isErasing = true; eraseAt(getMousePos(e)); return; } if (lakeOn) { let mp = getMousePos(e); currentLake = [{ x: mp.x, y: mp.y }]; isLakeDrawing = true; return; } if (structureSel) { let mp = getMousePos(e); isPlacing = true; lastPlacePos = mp; tryPlace(mp); return; } isDrawing = true; let pos = findSnapPos(getMousePos(e)); currentTrack = [pos]; tracks.push(currentTrack); });
         canvas.addEventListener('mousemove', (e) => {
             if (isErasing) { eraseAt(getMousePos(e)); return; }
@@ -582,6 +617,12 @@
             if (currentTrack.length < 2) { tracks.splice(tracks.indexOf(currentTrack), 1); currentTrack = null; return; }
             let lastP = currentTrack[currentTrack.length - 1], snapP = findSnapPos(lastP);
             if (getDistance(lastP, snapP) < getSnapRadius()) currentTrack[currentTrack.length - 1] = snapP;
+            { // すでにある線路（自分自身も含む）に重なった部分を取り除く
+                let pieces = cleanOverlap(currentTrack, tracks.filter(t => t !== currentTrack));
+                tracks.splice(tracks.indexOf(currentTrack), 1, ...pieces);
+                currentTrack = pieces[0] || null;
+                if (!currentTrack) return; // すべて重なりだった
+            }
             if (!train) { 
                 train = { track: currentTrack, idx: 0, dir: 1, t: 0 }; 
                 let p1 = currentTrack[0], p2 = currentTrack[1];
@@ -654,6 +695,7 @@
             if (!d || !Array.isArray(d.tracks)) throw new Error('bad data');
             const num = (v, def) => Number.isFinite(v) ? v : def;
             let newTracks = d.tracks.map(t => (Array.isArray(t) ? t : []).filter(p => p && Number.isFinite(p.x) && Number.isFinite(p.y)).map(p => ({ x: p.x, y: p.y }))).filter(t => t.length >= 2);
+            { let clean = []; newTracks.forEach(t => cleanOverlap(t, clean).forEach(pc => clean.push(pc))); newTracks = clean; } // 重なった線路は取り除く
             const types = ['station', 'house', 'building', 'tree'];
             let newStructs = (Array.isArray(d.structures) ? d.structures : []).filter(o => o && types.includes(o.type) && Number.isFinite(o.x) && Number.isFinite(o.y)).map(o => ({ type: o.type, x: o.x, y: o.y, rot: num(o.rot, 0), col: [0, 1, 2].includes(o.col) ? o.col : 0 }));
             lakes = (Array.isArray(d.lakes) ? d.lakes : []).map(l => {
